@@ -30,8 +30,15 @@ class Racing {
 	private races: race[] = []
 	private players: player[] = []
 
+	constructor() {
+		onNet('racingVehicleIsSpawned', ([raceId, vehId]) => {
+			const race = this.races.find(race => race.id == raceId)
+			race.vehicles.push(NetworkGetEntityFromNetworkId(vehId))
+		})
+	}
+
 	createRace = (source: number, args: string[]) => {
-		if (this.races?.find(race => race.host == source)) return console.log('Вы уже создали гонку')
+		if (this.players.find(player => player.source == source)) return console.log('Вы уже участвуете в гонке')
 		if (args.length !== 4) return console.log('Указаны не все аргументы')
 		const raceId = this.raceIdCounter++
 
@@ -45,13 +52,12 @@ class Racing {
 		if (!colors[color]) return console.log('Неверно указан цвет')
 		if (maxPlayers < 2 || maxPlayers > 16) return console.log('Укажите верное количество игроков (2-16)')
 
-		const veh = this.putInVehicle(raceId, source, GetHashKey(carName), tracks[track].startPoint, color)
+		this.putInVehicle(raceId, source, GetHashKey(carName), tracks[track].startPoint, color)
 
-		const vehicles = [veh]
 		const sourcePos = GetEntityCoords(GetPlayerPed(source))
 		const oldPos = {x: sourcePos[0], y: sourcePos[1], z: sourcePos[2], h: GetEntityHeading(GetPlayerPed(source))}
 
-		this.races.push({id: raceId, host, isStarted: false, track, carName, color, maxPlayers, vehicles})
+		this.races.push({id: raceId, host, isStarted: false, track, carName, color, maxPlayers, vehicles: []})
 		this.players.push({source, raceId, oldPos})
 	}
 
@@ -59,12 +65,13 @@ class Racing {
 		if (args.length < 1) return console.log('Используйте /raceinvite [Server Player ID]')
 
 		const playerId: number = +args[0]
+		const race = this.races.find(race => race.host == source)
+
+		if (!race) return console.log('У вас нет созданных гонок')
 		if (playerId == source) return console.log('Вы не можете пригласить себя')
 		if (this.players.find(player => player.source == playerId)) return console.log('Этот игрок уже в гонке')
-		const race = this.races.find(race => race.host == source)
-		if (!race) return console.log('У вас нет созданных гонок')
-		// if (race.isStarted) return console.log('Гонка уже началась')
 		if (this.getRacePlayersCount(race.id) == race.maxPlayers) return console.log('В гонке максимальное количество участников')
+		// if (race.isStarted) return console.log('Гонка уже началась')
 
 		const player = GetPlayerPed(playerId)
 		if (!player) return console.log(`Игрока с ID ${playerId} нет на сервере`)
@@ -78,8 +85,7 @@ class Racing {
 		const randomPos = this.getRandomCoords(sourcePos, 50)
 		const position = {x: randomPos.x, y: randomPos.y, z: sourcePos[2], h: 0}
 
-		const veh = this.putInVehicle(race.id, playerId, GetHashKey(race.carName), position, race.color)
-		race.vehicles.push(veh)
+		this.putInVehicle(race.id, playerId, GetHashKey(race.carName), position, race.color)
 	}
 
 	getRacePlayersCount = (raceId: number): number => {
@@ -116,38 +122,38 @@ class Racing {
 		const race = this.races.find(race => race.host == source)
 		if (!race) return console.log('Вы не начинали гонку')
 		if (race && !race.isStarted) return console.log('Гонка еще не началась')
+
 		this.removeRace(race.id)
 	}
 
 	removeRace = (raceId: number) => {
-		this.races.find((race, index) => {
+		this.races.forEach((race, index) => {
 			if (race.id == raceId) {
 				race.vehicles.forEach(veh => DeleteEntity(veh))
 				this.races.splice(index, 1)
 			}
 		})
-		this.players.forEach((player, index) => (player.raceId == raceId ? this.players.splice(index, 1) : false))
+
+		this.players.forEach(player => {
+			if (player.raceId == raceId) {
+				SetPlayerRoutingBucket(`${player.source}`, 0)
+				FreezeEntityPosition(player.source, false)
+
+				SetEntityCoords(GetPlayerPed(player.source), player.oldPos.x, player.oldPos.y, player.oldPos.z, true, false, true, false)
+				SetEntityHeading(player.source, player.oldPos.h)
+			}
+		})
+
+		this.players = this.players.filter(player => player.raceId !== raceId)
 	}
 
 	putInVehicle = (raceId: number, source: number, hash: number, pos: coords, color: string) => {
 		SetPlayerRoutingBucket(`${source}`, raceId)
 		SetEntityCoords(source, pos.x, pos.y, pos.z, true, false, true, false)
 
-		const veh = CreateVehicle(hash, pos.x, pos.y, pos.z, pos.h, true, true)
 		const colorArr = colors[color]
 
-		const interval = setInterval(() => {
-			if (!DoesEntityExist(veh)) return
-			console.log(DoesEntityExist(veh))
-			SetEntityRoutingBucket(veh, raceId)
-			SetVehicleCustomPrimaryColour(veh, colorArr[0], colorArr[1], colorArr[2])
-			SetVehicleCustomSecondaryColour(veh, colorArr[0], colorArr[1], colorArr[2])
-
-			SetPedIntoVehicle(source, veh, -1)
-			FreezeEntityPosition(veh, true)
-			clearInterval(interval)
-		}, 20)
-		return veh
+		emitNet('racingSpawnVehicle', source, [raceId, hash, pos, colorArr])
 	}
 
 	getRandomCoords = (pos: number[], radius: number) => {
@@ -174,7 +180,9 @@ class Racing {
 
 		race.isStarted = true
 
-		race.vehicles.forEach(veh => FreezeEntityPosition(veh, false))
+		race.vehicles.forEach(veh => {
+			FreezeEntityPosition(veh, false)
+		})
 	}
 }
 
